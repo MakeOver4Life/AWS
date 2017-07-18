@@ -1,0 +1,221 @@
+Description: >
+    This template deploys a Single EC2 m4.large Instance to the provided VPC and subnets
+
+Parameters:
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+
+    VPC:
+        Description: Choose which VPC this Instance should be deployed to
+        Type: AWS::EC2::VPC::Id
+        ConstraintDescription: Must be an existing VPC.
+
+    InstanceType:
+        Description: Which instance type should we use. Only m4.large is supported?
+        Type: String
+        Default: m4.large
+        ConstraintDescription: Only m4.large is supported for this Instance.
+
+    InstanceName:
+        Description: Name your instance will be identified as.
+        Type: String
+        Default: Instance
+        ConstraintDescription: Unique name of new Instance.
+
+    Subnets:
+        Description: Choose which subnets this Instance should be deployed to
+        Type: AWS::EC2::Subnet::Id
+        ConstraintDescription: Must be valid Subnet.
+
+    SecurityGroup:
+        Description: Select the Security Group to use for the Instance
+        Type: AWS::EC2::SecurityGroup::Id
+        ConstraintDescription: Must be a valid Security Group.
+
+    KeyName:
+        Description: Name of an existing EC2 KeyPair
+        Type: AWS::EC2::KeyPair::KeyName
+        ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+
+    RoleName:
+        Description: Name of an existing Role
+        Type: String
+        Default: ProductionAppRole
+        ConstraintDescription: Must be the name of an existing Role.
+
+    Monitoring:
+        Description: Enable or disable detailed monitoring.
+        Type: String
+        Default: 'false'
+        AllowedValues:
+          - 'true'
+          - 'false'
+        ConstraintDescription: Must be true or false.
+
+    DataVolZone:
+        Description: Name of an existing Availability zone to create the /data volume
+        Type: String
+        Default: ap-southeast-2a, 2b or 2c
+        ConstraintDescription: Must be the name of an existing zone.
+
+    DataVolSize:
+        Description: Size in GB of the /data volume
+        Type: String
+        Default: 10
+
+    RootVolSize:
+        Description: Size in GB of the root volume
+        Type: String
+        Default: 10
+
+Mappings:
+    AWSRegionToAMI:
+      ap-southeast-1:
+          AMI: ami-162c2575
+      ap-southeast-2:
+          AMI: ami-162c2575
+
+Resources:
+
+  InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref RoleName
+
+  Instance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      DisableApiTermination: 'false'
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: !FindInMap [AWSRegionToAMI, !Ref "AWS::Region", AMI]
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      Monitoring: !Ref Monitoring
+      Tags:
+        - Key: Name
+          Value: !Ref InstanceName
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref Subnets
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolSize
+            DeleteOnTermination: true
+      Volumes:
+        - Device: /dev/sdb
+          VolumeId: !Ref Volume
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash -x
+          # Make sure the volume has been created AND attached to this instance !
+          # Format /dev/sdb if it does not contain a partition yet
+            sudo mkfs -t ext4 /dev/sdb
+            sudo mkdir -p /data
+            sudo mount /dev/sdb /data
+
+            yum update -y
+
+            /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LaunchConfiguration
+
+            # Persist the volume in /etc/fstab so it gets mounted again
+              sudo echo '/dev/sdb /data ext4 defaults,nofail 0 2' >> /etc/fstab
+
+            /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource SSMAgentSetup
+
+            /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LogAgentSetup
+
+  Volume:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      AvailabilityZone: !Ref DataVolZone
+      Size: !Ref DataVolSize
+      VolumeType: gp2
+
+# Since we can attach the AWS::CloudFormation::Init to any resources Metadata section, we do so here instead of on the
+# instances so that we can easily keep track of and reuse the scripts as need be.
+  LogAgentSetup:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /tmp/aws_log.conf:
+              content: |
+                [general]
+                state_file = /var/awslogs/state/agent-state
+                logging_config_file = /var/awslogs/etc/awslogs.conf
+                use_gzip_http_content_encoding = true
+
+
+                [syslog]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/messages
+                buffer_duration = 5000
+                log_stream_name = syslog
+                initial_position = start_of_file
+                log_group_name = DwpnpeKiwibankLogGroup
+                encoding = utf-8
+                [audit-log]
+                datetime_format = %d/%b/%Y:%H:%M:%S %z
+                file = /var/log/audit/audit.log
+                buffer_duration = 5000
+                log_stream_name = audit-log
+                initial_position = start_of_file
+                log_group_name = DwpnpeKiwibankLogGroup
+                encoding = utf-8
+                [yum-log]
+                datetime_format = %d/%b/%Y:%H:%M:%S %z
+                file = /var/log/yum.log
+                buffer_duration = 5000
+                log_stream_name = yum-log
+                initial_position = start_of_file
+                log_group_name = DwpnpeKiwibankLogGroup
+                encoding = utf-8
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            /tmp/install_aws_log_agent:
+              content: |
+                #!/bin/bash
+                cd /tmp
+                # Get the CloudWatch Logs agent
+                wget https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py
+                # Install the CloudWatch Logs agent
+                python awslogs-agent-setup.py -n -r ap-southeast-2 -c /tmp/aws_log.conf || error_exit 'Failed to run CloudWatch Logs agent setup'
+              mode: "000755"
+              owner: "root"
+              group: "root"
+          commands:
+            01_install_aws_log_agent:
+              command: "/tmp/install_aws_log_agent"
+
+  SSMAgentSetup:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /tmp/install_ssm_agent:
+              content: |
+                #!/bin/bash
+                cd /tmp
+                curl https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm -o amazon-ssm-agent.rpm
+                yum install -y amazon-ssm-agent.rpm
+              mode: "000755"
+              owner: "root"
+              group: "root"
+          commands:
+            01_install_ssm_agent:
+              command: "/tmp/install_ssm_agent"
+
+Outputs:
+
+  InstanceName:
+    Description: 'Name of the newly created EC2 Instance'
+    Value: !Ref InstanceName

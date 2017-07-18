@@ -1,0 +1,332 @@
+Description: >
+    This template deploys a Single EC2 Instance Cluster to the provided VPC and subnets
+
+Parameters:
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+
+    VPC:
+        Description: Choose which VPC this Cluster should be deployed to
+        Type: AWS::EC2::VPC::Id
+        ConstraintDescription: Must be an existing VPC.
+
+    InstanceType:
+        Description: Which instance type should we use?
+        Type: String
+        Default: t2.micro
+        AllowedValues:
+          - t2.micro
+          - m1.small
+          - m1.medium
+          - m1.large
+          - m1.xlarge
+          - m2.xlarge
+          - m2.2xlarge
+          - m2.4xlarge
+          - m3.xlarge
+          - m3.2xlarge
+          - m4.large
+          - c1.medium
+          - c1.xlarge
+          - cc1.4xlarge
+          - cc2.8xlarge
+          - cg1.4xlarge
+        ConstraintDescription: Instance size of this Cluster.
+
+    MinClusterSize:
+        Description: The minimum amount of hosts to autoscale?
+        Type: Number
+        Default: 1
+
+    MaxClusterSize:
+        Description: The maxmimum amount of hosts to autoscale?
+        Type: Number
+        Default: 1
+
+    InstanceName:
+        Description: Name your Cluster will be identified as.
+        Type: String
+        Default: Instance
+        ConstraintDescription: Unique name of new Cluster.
+
+    Subnets:
+        Description: Choose which subnets this Cluster should be deployed to
+        Type: List<AWS::EC2::Subnet::Id>
+        ConstraintDescription: Must be valid Subnet.
+
+    SecurityGroup:
+        Description: Select the Security Group to use for the Cluster
+        Type: AWS::EC2::SecurityGroup::Id
+        ConstraintDescription: Must be a valid Security Group.
+
+    KeyName:
+        Description: Name of an existing EC2 KeyPair
+        Type: AWS::EC2::KeyPair::KeyName
+        ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+
+    RoleName:
+        Description: Name of an existing Role
+        Type: String
+        Default: ProductionAppRole
+        ConstraintDescription: Must be the name of an existing Role.
+
+    Monitoring:
+        Description: Enable or disable detailed monitoring.
+        Type: String
+        Default: 'false'
+        AllowedValues:
+          - 'true'
+          - 'false'
+        ConstraintDescription: Must be true or false.
+
+    DataVolZone:
+        Description: Name of an existing Availability zone to create the /data volume
+        Type: String
+        Default: ap-southeast-2a, 2b or 2c
+        ConstraintDescription: Must be the name of an existing zone.
+
+    DataVolSize:
+        Description: Size in GB of the /data volume
+        Type: String
+        Default: 10
+
+    RootVolSize:
+        Description: Size in GB of the root volume
+        Type: String
+        Default: 10
+
+Mappings:
+    # You can find the latest available on this page of our documentation:
+    # http://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-optimized_AMI.html
+    # (note the AMI identifier is region specific)
+    AWSRegionToAMI:
+      us-east-1:
+          AMI: ami-83af8395
+      us-east-2:
+          AMI: ami-9f9cbafa
+      us-west-1:
+          AMI: ami-c1c6eba1
+      us-west-2:
+          AMI: ami-11120768
+      eu-west-1:
+          AMI: ami-5f140c39
+      eu-west-2:
+          AMI: ami-767e6812
+      eu-central-1:
+          AMI: ami-e656f189
+      ap-northeast-1:
+          AMI: ami-fd10059a
+      ap-southeast-1:
+          AMI: ami-162c2575
+      ap-southeast-2:
+          AMI: ami-162c2575
+      ca-central-1:
+          AMI: ami-ead8678e
+
+Resources:
+
+  InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref RoleName
+
+  Cluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+          ClusterName: !Ref EnvironmentName
+
+  AutoScalingGroup:
+      Type: AWS::AutoScaling::AutoScalingGroup
+      Properties:
+          VPCZoneIdentifier: !Ref Subnets
+          LaunchConfigurationName: !Ref LaunchConfiguration
+          MinSize: !Ref MinClusterSize
+          MaxSize: !Ref MaxClusterSize
+          DesiredCapacity: !Ref MinClusterSize
+          Tags:
+              - Key: Name
+                Value: !Sub ${EnvironmentName} !Ref InstanceName
+                PropagateAtLaunch: true
+
+
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !FindInMap [AWSRegionToAMI, !Ref "AWS::Region", AMI]
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      InstanceMonitoring: !Ref Monitoring
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroups:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolSize
+        - DeviceName: /dev/sdb
+          Ebs:
+            VolumeSize: !Ref DataVolSize
+            VolumeType: gp2
+
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash -x
+          # Make sure the volume has been created AND attached to this instance !
+          # Format /dev/sdb if it does not contain a partition yet
+            sudo mkfs -t ext4 /dev/sdb
+            sudo mkdir -p /data
+            sudo mount /dev/sdb /data
+            sudo ln -sf /usr/share/zoneinfo/Pacific/Auckland /etc/localtime
+
+            yum update -y
+
+            sudo yum -y install rdate
+            sudo /usr/bin/rdate -s 198.60.22.240
+	    sudo ln -sf /usr/share/zoneinfo/Pacific/Auckland /etc/localtime
+
+            /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LaunchConfiguration
+
+            # Persist the volume in /etc/fstab so it gets mounted again
+            sudo echo '/dev/sdb /data ext4 defaults,nofail 0 2' >> /etc/fstab
+
+            /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource SSMAgentSetup
+
+            /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LogAgentSetup
+
+  ScaleUpPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: '60'
+      ScalingAdjustment: '1'
+
+  ScaleDownPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: '60'
+      ScalingAdjustment: '-1'
+
+  CPUAlarmHigh:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-up if CPU > 90% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '90'
+      AlarmActions:
+        - !Ref ScaleUpPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+
+  CPUAlarmLow:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-down if CPU < 70% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '2'
+      Threshold: '70'
+      AlarmActions:
+        - !Ref ScaleDownPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      ComparisonOperator: LessThanThreshold
+
+# Since we can attach the AWS::CloudFormation::Init to any resources Metadata section, we do so here instead of on the
+# instances so that we can easily keep track of and reuse the scripts as need be.
+  LogAgentSetup:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /tmp/aws_log.conf:
+              content: |
+                [general]
+                state_file = /var/awslogs/state/agent-state
+                logging_config_file = /var/awslogs/etc/awslogs.conf
+                use_gzip_http_content_encoding = true
+
+
+                [syslog]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/messages
+                buffer_duration = 5000
+                log_stream_name = syslog
+                initial_position = start_of_file
+                log_group_name = LogGroup
+                encoding = utf-8
+                [audit-log]
+                datetime_format = %d/%b/%Y:%H:%M:%S %z
+                file = /var/log/audit/audit.log
+                buffer_duration = 5000
+                log_stream_name = audit-log
+                initial_position = start_of_file
+                log_group_name = LogGroup
+                encoding = utf-8
+                [yum-log]
+                datetime_format = %d/%b/%Y:%H:%M:%S %z
+                file = /var/log/yum.log
+                buffer_duration = 5000
+                log_stream_name = yum-log
+                initial_position = start_of_file
+                log_group_name = LogGroup
+                encoding = utf-8
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            /tmp/install_aws_log_agent:
+              content: |
+                #!/bin/bash
+                cd /tmp
+                # Get the CloudWatch Logs agent
+                wget https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py
+                # Install the CloudWatch Logs agent
+                python awslogs-agent-setup.py -n -r ap-southeast-2 -c /tmp/aws_log.conf || error_exit 'Failed to run CloudWatch Logs agent setup'
+              mode: "000755"
+              owner: "root"
+              group: "root"
+          commands:
+            01_install_aws_log_agent:
+              command: "/tmp/install_aws_log_agent"
+
+  SSMAgentSetup:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /tmp/install_ssm_agent:
+              content: |
+                #!/bin/bash
+                cd /tmp
+                curl https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm -o amazon-ssm-agent.rpm
+                yum install -y amazon-ssm-agent.rpm
+              mode: "000755"
+              owner: "root"
+              group: "root"
+          commands:
+            01_install_ssm_agent:
+              command: "/tmp/install_ssm_agent"
+
+Outputs:
+
+  InstanceName:
+    Description: 'Name of the newly created EC2 Instance'
+    Value: !Ref InstanceName
+

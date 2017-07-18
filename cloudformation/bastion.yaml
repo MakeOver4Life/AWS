@@ -1,0 +1,298 @@
+Description: >
+  This template deploys a Single EC2 Instance to the provided
+  VPC and subnets
+Parameters:
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+
+    VPC:
+        Description: Choose which VPC this Instance should be deployed to
+        Type: AWS::EC2::VPC::Id
+        ConstraintDescription: Must be an existing VPC.
+
+    InstanceType:
+        Description: Which instance type should we use. Only m4.large is supported?
+        Type: String
+        AllowedValues:
+          - t2.nano
+          - t2.micro
+          - t2.small
+          - t2.medium
+          - t2.large
+        ConstraintDescription: Only m4.large is supported for this Instance.
+
+    InstanceName:
+        Description: Name your instance will be identified as.
+        Type: String
+        Default: Instance
+        ConstraintDescription: Unique name of new Instance.
+
+    Subnets:
+        Description: Choose which subnets this Instance should be deployed to
+        Type: AWS::EC2::Subnet::Id
+        ConstraintDescription: Must be valid Subnet.
+
+    SecurityGroup:
+        Description: Select the Security Group to use for the Instance
+        Type: AWS::EC2::SecurityGroup::Id
+        ConstraintDescription: Must be a valid Security Group.
+
+    KeyName:
+        Description: Name of an existing EC2 KeyPair
+        Type: AWS::EC2::KeyPair::KeyName
+        ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+
+    RoleName:
+        Description: Name of an existing Role
+        Type: String
+        Default: BastionRole
+        ConstraintDescription: Must be the name of an existing Role.
+
+    Monitoring:
+        Description: Enable or disable detailed monitoring.
+        Type: String
+        Default: 'false'
+        AllowedValues:
+          - 'true'
+          - 'false'
+        ConstraintDescription: Must be true or false.
+
+    RootVolSize:
+        Description: Size in GB of the root volume
+        Type: String
+        Default: 10
+
+Mappings:
+    AWSRegionToAMI:
+      ap-southeast-1:
+          AMI: ami-162c2575
+      ap-southeast-2:
+          AMI: ami-162c2575
+
+Resources:
+
+  InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref RoleName
+
+  Instance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      DisableApiTermination: 'false'
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: !FindInMap [AWSRegionToAMI, !Ref "AWS::Region", AMI]
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      Monitoring: !Ref Monitoring
+      Tags:
+        - Key: Name
+          Value: !Ref InstanceName
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref Subnets
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolSize
+            DeleteOnTermination: true
+      UserData:
+        'Fn::Base64': !Sub >
+          #!/bin/bash -x
+
+          yum update -y
+
+          yum update -y aws-cfn-bootstrap
+
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LaunchConfiguration
+
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource PamDuoSetup
+
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LogAgentSetup
+
+  EIPAddress:
+    Type: 'AWS::EC2::EIP'
+  EIPAssoc:
+    Type: 'AWS::EC2::EIPAssociation'
+    Properties:
+      InstanceId: !Ref Instance
+      EIP: !Ref EIPAddress
+
+# Since we can attach the AWS::CloudFormation::Init to any resources Metadata section, we do so here instead of on the
+# instances so that we can easily keep track of and reuse the scripts as need be.
+  PamDuoSetup:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              openssl-devel: []
+              pam-devel: []
+              gcc: []
+          files:
+            /tmp/download-and-install-duo-pam:
+              content: |
+                #!/bin/bash
+                # Taken straight from the duo_pam documentation
+                wget https://dl.duosecurity.com/duo_unix-latest.tar.gz
+                tar zxf duo_unix-latest.tar.gz
+                cd duo_unix-1.9.21
+                ./configure --with-pam --prefix=/usr && make && sudo make install
+              mode: "000755"
+              owner: "root"
+              group: "root"
+            /tmp/configure-duo-pam:
+              content: |
+                #!/bin/bash
+                # Install jq - a command line tool to help parse json responses from AWS
+                yum install jq -y
+                # Replace the items in the pam_duo config file with the unix credentials
+                sed -i "s/ikey = /ikey = DIDVHWUCMWF9SS0XNWEA/g" /etc/duo/pam_duo.conf
+                sed -i "s/skey = /skey = DSZybXmgWYx2qpkE2rIVe60YF155tjn16PRqSvR1/g" /etc/duo/pam_duo.conf
+                sed -i "s/host = /host = api-a2d90900.duosecurity.com/g" /etc/duo/pam_duo.conf
+                echo "autopush = yes" >> /etc/duo/pam_duo.conf
+                # Clean up the config file (remove double quotes and backslashes)
+                sed -i 's/\\//g' /etc/duo/pam_duo.conf
+                sed -i 's/"//g' /etc/duo/pam_duo.conf
+                # Configuration for the sshd_config file
+                sed -i "s/#PubkeyAuthentication yes/PubkeyAuthentication yes/g" /etc/ssh/sshd_config
+                sed -i "s/ChallengeResponseAuthentication no/ChallengeResponseAuthentication yes/g" /etc/ssh/sshd_config
+                sed -i "s/#UseDNS yes/UseDNS no/g" /etc/ssh/sshd_config
+                printf "\nAuthenticationMethods publickey,keyboard-interactive" >> /etc/ssh/sshd_config
+              mode: "000755"
+              owner: "root"
+              group: "root"
+            /tmp/sshd:
+              content: |
+                #%PAM-1.0
+                auth       required     pam_sepermit.so
+                auth       required     pam_duo.so
+                auth       include      postlogin
+                # Used with polkit to reauthorize users in remote sessions
+                -auth      optional     pam_reauthorize.so prepare
+                account    required     pam_nologin.so
+                account    include      password-auth
+                password   include      password-auth
+                # pam_selinux.so close should be the first session rule
+                session    required     pam_selinux.so close
+                session    required     pam_loginuid.so
+                # pam_selinux.so open should only be followed by sessions to be executed in the user context
+                session    required     pam_selinux.so open env_params
+                session    required     pam_namespace.so
+                session    optional     pam_keyinit.so force revoke
+                session    include      password-auth
+                session    include      postlogin
+                # Used with polkit to reauthorize users in remote sessions
+                -session   optional     pam_reauthorize.so prepare
+              mode: "000766"
+              owner: "root"
+              group: "root"
+            /tmp/system-auth:
+              content: |
+                #%PAM-1.0
+                # This file is auto-generated.
+                # User changes will be destroyed the next time authconfig is run.
+                auth        required      pam_env.so
+                auth        requisite     pam_unix.so nullok try_first_pass
+                auth        sufficient    pam_duo.so
+                auth        requisite     pam_succeed_if.so uid >= 500 quiet_success
+                auth        required      pam_deny.so
+
+                account     required      pam_unix.so
+                account     sufficient    pam_localuser.so
+                account     sufficient    pam_succeed_if.so uid < 500 quiet
+                account     required      pam_permit.so
+
+                password    requisite     pam_pwquality.so try_first_pass local_users_only retry=3 authtok_type=
+                password    sufficient    pam_unix.so sha512 shadow nullok try_first_pass use_authtok
+                password    required      pam_deny.so
+
+                session     optional      pam_keyinit.so revoke
+                session     required      pam_limits.so
+                -session     optional      pam_systemd.so
+                session     [success=1 default=ignore] pam_succeed_if.so service in crond quiet use_uid
+                session     required      pam_unix.so
+              mode: "000766"
+              owner: "root"
+              group: "root"
+          commands:
+            01_install_duo:
+              command: "/tmp/download-and-install-duo-pam"
+            02_configure_duo:
+              command: "/tmp/configure-duo-pam"
+            03_replace_pam_config_1:
+              command: "mv -f /tmp/sshd /etc/pam.d/sshd"
+            04_replace_pam_config_2:
+              command: "mv -f /tmp/system-auth /etc/pam.d/system-auth"
+            05_reboot:
+              command: "reboot now"
+
+  LogAgentSetup:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /tmp/aws_log.conf:
+              content: |
+                [general]
+                state_file = /var/awslogs/state/agent-state
+                logging_config_file = /var/awslogs/etc/awslogs.conf
+                use_gzip_http_content_encoding = true
+
+
+                [syslog]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/messages
+                buffer_duration = 5000
+                log_stream_name = syslog
+                initial_position = start_of_file
+                log_group_name = LogGroup
+                encoding = utf-8
+                [audit-log]
+                datetime_format = %d/%b/%Y:%H:%M:%S %z
+                file = /var/log/audit/audit.log
+                buffer_duration = 5000
+                log_stream_name = audit-log
+                initial_position = start_of_file
+                log_group_name = LogGroup
+                encoding = utf-8
+                [yum-log]
+                datetime_format = %d/%b/%Y:%H:%M:%S %z
+                file = /var/log/yum.log
+                buffer_duration = 5000
+                log_stream_name = yum-log
+                initial_position = start_of_file
+                log_group_name = LogGroup
+                encoding = utf-8
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            /tmp/install_aws_log_agent:
+              content: |
+                #!/bin/bash
+                cd /tmp
+                # Get the CloudWatch Logs agent
+                wget https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py
+                # Install the CloudWatch Logs agent
+                python awslogs-agent-setup.py -n -r ap-southeast-2 -c /tmp/aws_log.conf || error_exit 'Failed to run CloudWatch Logs agent setup'
+              mode: "000755"
+              owner: "root"
+              group: "root"
+          commands:
+            01_install_aws_log_agent:
+              command: "/tmp/install_aws_log_agent"
+
+Outputs:
+  ProdInstanceName:
+    Description: Name of the newly created EC2 Instance
+    Value: !Ref Instance
+  ProdInstanceEIP:
+    Description: IP Address of the newly created Instance
+    Value: !Join [ ",", [ !Ref InstanceName, !Ref EIPAddress ]]

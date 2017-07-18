@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+    This template contains the Roles required by our entire stack.
+    We create them in a seperate nested template, so they can be referenced
+    by all of the other nested templates.
+
+Parameters:
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+
+    VPC:
+        Type: AWS::EC2::VPC::Id
+        Description: Choose which VPC the security groups should be deployed to
+
+Resources:
+
+  BastionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+      RoleName: BastionRole
+  BastionInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - Ref: BastionRole
+
+  ProductionAppRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+      RoleName: ProductionAppRole
+  ProductionAppInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - Ref: ProductionAppRole
+
+  TestAppRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+      RoleName: TestAppRole
+  ProductionAppInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - Ref: TestAppRole
+
+
+Outputs:
+  BastionRoleId:
+    Description: 'RoleId of the newly created Role: BastionRole'
+    Value:
+      Ref: BastionRole
+    Export:
+      Name: !Sub '${AWS::StackName}-BastionRole'
+  BastionRoleArn:
+    Description: 'RoleArn of the newly created Role: BastionRole'
+    Value: !GetAtt BastionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BastionRoleArn'
+  ProductionAppRoleId:
+    Description: 'RoleId of the newly created Role: ProductionAppRole'
+    Value:
+      Ref: ProductionAppRole
+    Export:
+      Name: !Sub '${AWS::StackName}-ProductionAppRole'
+  ProductionAppRoleArn:
+    Description: 'RoleArn of the newly created Role: ProductionAppRole'
+    Value: !GetAtt ProductionAppRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ProductionAppRoleArn'
+  TestAppRoleId:
+    Description: 'RoleId of the newly created Role: TestAppRole'
+    Value:
+      Ref: TestAppRole
+    Export:
+      Name: !Sub '${AWS::StackName}-TestAppRole'
+  TestAppRoleArn:
+    Description: 'RoleArn of the newly created Role: TestAppRole'
+    Value: !GetAtt TestAppRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TestAppRoleArn'

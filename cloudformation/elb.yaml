@@ -1,0 +1,106 @@
+Description: >
+    This template deploys a Classic Load Balancer that exposes our various services.
+    We create them in a seperate nested template, so it can be referenced by all of the other nested templates.
+
+Parameters:
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+
+    VPC:
+        Type: AWS::EC2::VPC::Id
+        Description: Choose which VPC the Applicaion Load Balancer should be deployed to
+
+    Subnets:
+        Description: Choose which subnets the Applicaion Load Balancer should be deployed to
+        Type: List<AWS::EC2::Subnet::Id>
+
+    SecurityGroup:
+        Description: Select the Security Group to apply to the Applicaion Load Balancer
+        Type: AWS::EC2::SecurityGroup::Id
+
+    SSLCertificate:
+        Description: SSLCertificate to apply to the Applicaion Load Balancer
+        Type: String
+        AllowedValues:
+           - arn:aws:acm:ap-southeast-2:130216941401:certificate/59270c68-f78b-40af-a371-e44eb2e4b65d
+           - arn:aws:acm:ap-southeast-2:130216941401:certificate/9bba77b5-c809-4bc1-82e9-ea8ba4806697
+
+    HTTPLoadBalancerPort:
+        Description: The port open to outside of ELB
+        Type: String
+        Default: 80
+
+    HTTPInstancePort:
+        Description: The port open between the instance and the ELB
+        Type: String
+        Default: 80
+
+    HTTPProtocol:
+        Description: The HTTP protocol to use
+        Type: String
+        Default: HTTP
+
+    HTTPSLoadBalancerPort:
+        Description: The HTTPS port open to outside of ELB
+        Type: String
+        Default: 443
+
+    HTTPSInstancePort:
+        Description: The HTTPS port open between the instance and the ELB
+        Type: String
+        Default: 8080
+
+    HTTPSProtocol:
+        Description: The HTTPS protocol to use
+        Type: String
+        Default: HTTPS
+
+    HealthCheckTarget:
+        Description: The health check target to verify instance availability
+        Type: String
+        Default: HTTP:80/index.html
+
+    Instance:
+        Description: Instance to associate ELB with
+        Type: AWS::EC2::Instance::Id
+
+Resources:
+
+    LoadBalancer:
+        Type: AWS::ElasticLoadBalancing::LoadBalancer
+        Properties:
+            LoadBalancerName: !Ref EnvironmentName
+            Subnets: !Ref Subnets
+            SecurityGroups:
+                - !Ref SecurityGroup
+            Tags:
+                - Key: Name
+                  Value: !Ref EnvironmentName
+            Instances:
+              - Ref: Instance
+            Listeners:
+              - LoadBalancerPort: !Ref HTTPLoadBalancerPort
+                InstancePort: !Ref HTTPInstancePort
+                Protocol: !Ref HTTPProtocol
+              - LoadBalancerPort: !Ref HTTPSLoadBalancerPort
+                InstancePort: !Ref HTTPSInstancePort
+                Protocol: !Ref HTTPSProtocol
+                SSLCertificateId: !Ref SSLCertificate
+            HealthCheck:
+              Target: !Ref HealthCheckTarget
+              HealthyThreshold: '5'
+              UnhealthyThreshold: '3'
+              Interval: '30'
+              Timeout: '5'
+
+Outputs:
+
+    LoadBalancer:
+        Description: A reference to the Application Load Balancer
+        Value: !Ref LoadBalancer
+
+    LoadBalancerUrl:
+        Description: The URL of the ALB
+        Value: !GetAtt LoadBalancer.DNSName

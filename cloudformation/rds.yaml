@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+    This template deploys a RDS with Master DB and Read Replica.
+    We create them in a seperate nested template, so it can be referenced
+    by all of the other nested templates.
+
+Parameters:
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VpcId of your existing Virtual Private Cloud (VPC)
+
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >-
+      The list of SubnetIds, choose at least two Availability Zones in the region
+      in your Virtual Private Cloud (VPC)
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+    ConstraintDescription: Must be a valid Security Group.
+
+  DBName:
+    Default: MyDatabase
+    Description: The database name
+    Type: String
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+
+  DBUsername:
+    Default: postgres
+    Description: The database admin account username
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+
+  DBPassword:
+    Default: password
+    Description: The database admin account password
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: Must contain only alphanumeric characters.
+
+  DBClass:
+    Default: db.t2.micro
+    Description: Database instance class
+    Type: String
+    AllowedValues:
+      - db.t2.micro
+      - db.t2.small
+      - db.m3.medium
+    ConstraintDescription: Must select a valid database instance type.
+
+  DBAllocatedStorage:
+    Default: '5'
+    Description: The size of the database (Gb)
+    Type: Number
+    MinValue: '5'
+    MaxValue: '1024'
+    ConstraintDescription: Must be between 5 and 1024Gb.
+
+  MultiAZ:
+    Description: Multi-AZ master database
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    ConstraintDescription: Must be true or false.
+
+  ReadReplica:
+    Description: Create a read replica
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    ConstraintDescription: Must be true or false.
+
+Conditions:
+  CreateReadReplica: !Equals
+    - !Ref ReadReplica
+    - 'true'
+
+Resources:
+  MasterDBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: Subnets available for the RDS DB Instance
+      SubnetIds: !Ref Subnets
+
+  MasterDB:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      DBName: !Ref DBName
+      AllocatedStorage: !Ref DBAllocatedStorage
+      DBInstanceClass: !Ref DBClass
+      Engine: postgres
+      EngineVersion: '9.5.6'
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref MasterDBSubnetGroup
+      MultiAZ: !Ref MultiAZ
+      Tags:
+        - Key: Name
+          Value: Master Database
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+  ReplicaDB:
+    Type: 'AWS::RDS::DBInstance'
+    Condition: CreateReadReplica
+    Properties:
+      SourceDBInstanceIdentifier: !Ref MasterDB
+      DBInstanceClass: !Ref DBClass
+      Tags:
+        - Key: Name
+          Value: Read Replica Database
+
+Outputs:
+  MasterJDBCConnectionString:
+    Description: JDBC connection string for the master database
+    Value: !Join
+      - ''
+      - - 'jdbc:mysql://'
+        - !GetAtt
+          - MasterDB
+          - Endpoint.Address
+        - ':'
+        - !GetAtt
+          - MasterDB
+          - Endpoint.Port
+        - /
+        - !Ref DBName
+  ReplicaJDBCConnectionString:
+    Condition: CreateReadReplica
+    Description: JDBC connection string for the replica database
+    Value: !Join
+      - ''
+      - - 'jdbc:mysql://'
+        - !GetAtt
+          - ReplicaDB
+          - Endpoint.Address
+        - ':'
+        - !GetAtt
+          - ReplicaDB
+          - Endpoint.Port
+        - /
+        - !Ref DBName
